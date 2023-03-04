@@ -77,21 +77,28 @@ func createNewRunner(ctx context.Context, out io.Writer, opts config.SkaffoldOpt
 	return runner, configs, runCtx, nil
 }
 
-func runContext(ctx context.Context, out io.Writer, opts config.SkaffoldOptions) (*runcontext.RunContext, []util.VersionedConfig, error) {
+func getRunConfigs(ctx context.Context, out io.Writer, opts config.SkaffoldOptions) ([]util.VersionedConfig, error) {
 	cfgSet, err := withFallbackConfig(ctx, out, opts, parser.GetConfigSet)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	setDefaultRendererAndDeployer(cfgSet)
 
 	if err := validation.Process(cfgSet, validation.GetValidationOpts(opts)); err != nil {
-		return nil, nil, fmt.Errorf("invalid skaffold config: %w", err)
+		return nil, fmt.Errorf("invalid skaffold config: %w", err)
 	}
 	var configs []util.VersionedConfig
 	for _, cfg := range cfgSet {
 		configs = append(configs, cfg.SkaffoldConfig)
 	}
+	return configs, nil
+}
 
+func runContext(ctx context.Context, out io.Writer, opts config.SkaffoldOptions) (*runcontext.RunContext, []util.VersionedConfig, error) {
+	configs, err := getRunConfigs(ctx, out, opts)
+	if err != nil {
+		return nil, nil, fmt.Errorf("getting run configs: %w", err)
+	}
 	runCtx, err := runcontext.GetRunContext(ctx, opts, configs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("getting run context: %w", err)

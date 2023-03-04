@@ -32,7 +32,6 @@ import (
 	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/debugging"
 	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/kubernetes/manifest"
 	rUtil "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/render/renderer/util"
-	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/runner"
 	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/latest"
 	"github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/schema/util"
 	pkgutil "github.com/GoogleContainerTools/skaffold/v2/pkg/skaffold/util"
@@ -64,46 +63,49 @@ func NewCmdFilter() *cobra.Command {
 // runFilter loads the Kubernetes manifests from stdin and applies the debug transformations.
 // Unlike `skaffold debug`, this filtering affects all images and not just the built artifacts.
 func runFilter(ctx context.Context, out io.Writer, debuggingFilters bool, buildArtifacts []graph.Artifact) error {
-	return withRunner(ctx, out, func(r runner.Runner, configs []util.VersionedConfig) error {
-		manifestList, err := manifest.Load(os.Stdin)
+	configs, err := getRunConfigs(ctx, out, opts)
+	if err != nil {
+		return fmt.Errorf("getting run configs: %w", err)
+	}
+
+	manifestList, err := manifest.Load(os.Stdin)
+	if err != nil {
+		return fmt.Errorf("loading manifests: %w", err)
+	}
+
+	allow, deny := getTransformList(configs)
+
+	manifestList, err = manifestList.SetLabels(pkgutil.EnvSliceToMap(opts.CustomLabels, "="),
+		manifest.NewResourceSelectorLabels(allow, deny))
+	if err != nil {
+		return err
+	}
+	manifestList, err = manifestList.ReplaceImages(ctx, buildArtifacts, manifest.NewResourceSelectorImages(allow, deny))
+	if err != nil {
+		return err
+	}
+
+	if debuggingFilters {
+		// TODO(bdealwis): refactor this code
+		debugHelpersRegistry, err := config.GetDebugHelpersRegistry(opts.GlobalConfig)
 		if err != nil {
-			return fmt.Errorf("loading manifests: %w", err)
+			return fmt.Errorf("resolving debug helpers: %w", err)
 		}
-
-		allow, deny := getTransformList(configs)
-
-		manifestList, err = manifestList.SetLabels(pkgutil.EnvSliceToMap(opts.CustomLabels, "="),
-			manifest.NewResourceSelectorLabels(allow, deny))
+		insecureRegistries, err := getInsecureRegistries(opts, configs)
 		if err != nil {
-			return err
+			return fmt.Errorf("retrieving insecure registries: %w", err)
 		}
-		manifestList, err = manifestList.ReplaceImages(ctx, buildArtifacts, manifest.NewResourceSelectorImages(allow, deny))
+
+		manifestList, err = debugging.ApplyDebuggingTransforms(manifestList, buildArtifacts, manifest.Registries{
+			DebugHelpersRegistry: debugHelpersRegistry,
+			InsecureRegistries:   insecureRegistries,
+		})
 		if err != nil {
-			return err
+			return fmt.Errorf("transforming manifests: %w", err)
 		}
-
-		if debuggingFilters {
-			// TODO(bdealwis): refactor this code
-			debugHelpersRegistry, err := config.GetDebugHelpersRegistry(opts.GlobalConfig)
-			if err != nil {
-				return fmt.Errorf("resolving debug helpers: %w", err)
-			}
-			insecureRegistries, err := getInsecureRegistries(opts, configs)
-			if err != nil {
-				return fmt.Errorf("retrieving insecure registries: %w", err)
-			}
-
-			manifestList, err = debugging.ApplyDebuggingTransforms(manifestList, buildArtifacts, manifest.Registries{
-				DebugHelpersRegistry: debugHelpersRegistry,
-				InsecureRegistries:   insecureRegistries,
-			})
-			if err != nil {
-				return fmt.Errorf("transforming manifests: %w", err)
-			}
-		}
-		out.Write([]byte(manifestList.String()))
-		return nil
-	})
+	}
+	out.Write([]byte(manifestList.String()))
+	return nil
 }
 
 func getTransformList(configs []util.VersionedConfig) (map[apim.GroupKind]latest.ResourceFilter, map[apim.GroupKind]latest.ResourceFilter) {
